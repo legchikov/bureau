@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bureau</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; background: #0e1014; }
+    #scene { position: fixed; inset: 0; }
+
+    /* CSS overlays positioned over projected 3D coordinates */
+    #overlay { position: fixed; inset: 0; pointer-events: none; }
+    .label {
+      position: absolute; transform: translate(-50%, -50%);
+      font-size: 12px; font-weight: 600; letter-spacing: .02em;
+      color: #aeb6c2; text-shadow: 0 1px 3px #000; white-space: nowrap;
+    }
+    .bubble {
+      position: absolute; transform: translate(-50%, -100%);
+      max-width: 320px; padding: 8px 12px; border-radius: 12px;
+      background: #f6f7f9; color: #15171c; font-size: 13px; line-height: 1.35;
+      box-shadow: 0 6px 24px rgba(0,0,0,.45); opacity: 0; transition: opacity .15s;
+      pointer-events: none;
+    }
+    .bubble.show { opacity: 1; }
+    .bubble.think { background: #2a2f3a; color: #cdd4df; font-style: italic; }
+    .bubble::after {
+      content: ""; position: absolute; left: 50%; bottom: -6px; transform: translateX(-50%);
+      border: 6px solid transparent; border-top-color: #f6f7f9; border-bottom: 0;
+    }
+    .bubble.think::after { border-top-color: #2a2f3a; }
+
+    /* Task input bar */
+    #bar {
+      position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+      display: flex; gap: 8px; width: min(640px, 92vw);
+      background: rgba(20,23,30,.85); backdrop-filter: blur(8px);
+      padding: 8px; border-radius: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+    }
+    #prompt {
+      flex: 1; border: 0; outline: 0; background: #0e1014; color: #e7ebf1;
+      padding: 11px 14px; border-radius: 9px; font-size: 14px;
+    }
+    #send {
+      border: 0; background: #4f8cff; color: #fff; font-weight: 600;
+      padding: 0 18px; border-radius: 9px; cursor: pointer; font-size: 14px;
+    }
+    #send:disabled { opacity: .5; cursor: default; }
+
+    #status {
+      position: fixed; top: 14px; left: 16px; font-size: 12px; color: #5d6675;
+    }
+    #status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #d9534f; margin-right: 6px; vertical-align: middle; }
+    #status.online .dot { background: #4caf50; }
+    .demo-tag { color: #e0a800; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="overlay"></div>
+  <div id="status"><span class="dot"></span><span class="txt">connecting…</span></div>
+  <form id="bar">
+    <input id="prompt" autocomplete="off"
+      placeholder="Type a task — e.g. search the web for the Eiffel Tower height and tell me" />
+    <button id="send" type="submit">Send</button>
+  </form>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  } }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+
+    // ---- Station layout (server uses these same names) -------------------------------------
+    const HOME = new THREE.Vector3(0, 0, 0);
+    const STATIONS = {
+      research: { pos: new THREE.Vector3(-6, 0, -3), label: "Research Desk",   color: 0x4f8cff },
+      code:     { pos: new THREE.Vector3( 6, 0, -3), label: "Code Workstation", color: 0x47c97e },
+      art:      { pos: new THREE.Vector3(-6, 0,  4), label: "Art Easel",       color: 0xd96fd9 },
+      comms:    { pos: new THREE.Vector3( 6, 0,  4), label: "Comms Desk",      color: 0xe0a800 },
+      desk:     { pos: new THREE.Vector3( 0, 0,  6), label: "Workbench",       color: 0x9aa4b2 },
+    };
+
+    // ---- Three.js setup --------------------------------------------------------------------
+    const canvas = document.getElementById("scene");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0e1014);
+    scene.fog = new THREE.Fog(0x0e1014, 18, 40);
+
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    camera.position.set(0, 11, 15);
+    camera.lookAt(0, 0, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const key = new THREE.DirectionalLight(0xffffff, 0.9);
+    key.position.set(6, 12, 8);
+    scene.add(key);
+
+    // Floor
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40),
+      new THREE.MeshStandardMaterial({ color: 0x171b22, roughness: 1 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    scene.add(floor);
+    const grid = new THREE.GridHelper(40, 40, 0x2a3340, 0x1d232c);
+    grid.position.y = 0.01;
+    scene.add(grid);
+
+    // Desks (a small box per station)
+    const overlay = document.getElementById("overlay");
+    const labelEls = {};
+    for (const [name, s] of Object.entries(STATIONS)) {
+      const desk = new THREE.Mesh(
+        new THREE.BoxGeometry(2, 0.7, 1.2),
+        new THREE.MeshStandardMaterial({ color: s.color, roughness: 0.6 })
+      );
+      desk.position.copy(s.pos).setY(0.35);
+      scene.add(desk);
+
+      const el = document.createElement("div");
+      el.className = "label";
+      el.textContent = s.label;
+      overlay.appendChild(el);
+      labelEls[name] = { el, world: s.pos.clone().setY(1.4) };
+    }
+
+    // Agent cube
+    const agent = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0xf6f7f9, roughness: 0.4, metalness: 0.1 })
+    );
+    agent.position.copy(HOME).setY(0.5);
+    scene.add(agent);
+
+    // Speech / thinking bubble (single element, follows the agent)
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    overlay.appendChild(bubble);
+    let bubbleTimer = null;
+    function showBubble(text, think = false, sticky = false) {
+      bubble.textContent = text;
+      bubble.classList.toggle("think", think);
+      bubble.classList.add("show");
+      clearTimeout(bubbleTimer);
+      if (!sticky) bubbleTimer = setTimeout(() => bubble.classList.remove("show"), 6000);
+    }
+    function hideBubble() { clearTimeout(bubbleTimer); bubble.classList.remove("show"); }
+
+    // ---- Movement: tween the agent toward a target on the floor ----------------------------
+    let target = HOME.clone();
+    function walkTo(vec3) { target = vec3.clone().setY(0.5); }
+
+    // Project a world coord to screen pixels for the CSS overlays
+    const proj = new THREE.Vector3();
+    function toScreen(world) {
+      proj.copy(world).project(camera);
+      return {
+        x: (proj.x * 0.5 + 0.5) * innerWidth,
+        y: (-proj.y * 0.5 + 0.5) * innerHeight,
+        visible: proj.z < 1,
+      };
+    }
+
+    function resize() {
+      renderer.setSize(innerWidth, innerHeight, false);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    addEventListener("resize", resize);
+    resize();
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // ease the agent toward target; gentle bob while moving
+      agent.position.lerp(target, 0.06);
+      const moving = agent.position.distanceTo(target) > 0.05;
+      agent.position.y = 0.5 + (moving ? Math.abs(Math.sin(performance.now() / 120)) * 0.12 : 0);
+      agent.rotation.y += moving ? 0.04 : 0.005;
+
+      // position desk labels
+      for (const { el, world } of Object.values(labelEls)) {
+        const p = toScreen(world);
+        el.style.display = p.visible ? "block" : "none";
+        el.style.left = p.x + "px";
+        el.style.top = p.y + "px";
+      }
+      // position bubble above the agent's head
+      const bp = toScreen(agent.position.clone().setY(1.6));
+      bubble.style.left = bp.x + "px";
+      bubble.style.top = bp.y + "px";
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // ---- WebSocket: drive the scene from server events -------------------------------------
+    const statusEl = document.getElementById("status");
+    const statusTxt = statusEl.querySelector(".txt");
+    const sendBtn = document.getElementById("send");
+    const promptEl = document.getElementById("prompt");
+
+    let ws;
+    function connect() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onopen = () => {
+        console.log("connected");
+        statusEl.classList.add("online");
+        statusTxt.textContent = "connected";
+      };
+      ws.onclose = () => {
+        statusEl.classList.remove("online");
+        statusTxt.textContent = "disconnected — retrying…";
+        setTimeout(connect, 1500);
+      };
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        console.log("event", msg);
+        handle(msg);
+      };
+    }
+    connect();
+
+    let runningDemo = false;
+    function handle(msg) {
+      if (msg.demo && !runningDemo) {
+        runningDemo = true;
+        statusTxt.innerHTML = 'connected <span class="demo-tag">· demo mode (Hermes offline)</span>';
+      }
+      switch (msg.type) {
+        case "tool.started": {
+          const s = STATIONS[msg.station] || STATIONS.desk;
+          walkTo(s.pos);
+          showBubble(`using ${msg.tool}…`, true);
+          break;
+        }
+        case "tool.completed":
+          break;
+        case "reasoning":
+          showBubble(msg.text || "…", true);
+          break;
+        case "message":
+          showBubble(msg.text, false, true);
+          break;
+        case "done":
+          showBubble(msg.output, false);
+          walkTo(HOME);
+          sendBtn.disabled = false;
+          break;
+        case "error":
+          showBubble("⚠ " + msg.error, false);
+          walkTo(HOME);
+          sendBtn.disabled = false;
+          break;
+      }
+    }
+
+    document.getElementById("bar").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const prompt = promptEl.value.trim();
+      if (!prompt || !ws || ws.readyState !== WebSocket.OPEN) return;
+      runningDemo = false;
+      hideBubble();
+      sendBtn.disabled = true;
+      ws.send(JSON.stringify({ type: "task", prompt }));
+      promptEl.value = "";
+    });
+  </script>
+</body>
+</html>
