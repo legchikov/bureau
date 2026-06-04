@@ -57,7 +57,51 @@ human player — so the server stays a dumb relay. No tick loop, no server-side 
   (~line 2646).
 - Caveat for later: subagent events are intentionally **not** forwarded on this SSE stream
   (`api_server.py:2672`). Out of scope for the prototype; revisit via the gateway event bus
-  when we want subagents-as-characters.
+  when we want subagents-as-characters. **This caveat turned out to dominate real behavior —
+  see Validation below.**
+
+## Validation results (2026-06-04) — concept proven, with one real catch
+
+The prototype was run end-to-end against a live Hermes (provider: `claude-sonnet-4-6` via the
+2GIS proxy `ai-openai-proxy.k8s.n3.2gis.io`, reachable only on VPN). Driving Hermes through the
+Bureau WebSocket relay:
+
+- **No-tool task** (`"reply with: pong"`) → `message` deltas → `reasoning` → `done` in **2.6s**.
+  The full relay path (POST → live SSE → normalize by `event` key → WS) works as designed.
+- **Web-search task** (`"search the web for the Eiffel Tower height…"`) → the cube walks, then
+  speaks the correct answer *"The Eiffel Tower is 330 metres tall."* in **13.4s**. Concept
+  validated: a real agent run drives the character and its spoken answer. ✅
+
+**The catch (confirms the subagent caveat above).** On the web-search task the only tool event
+the top-level run emitted was:
+```
+tool.started  tool=delegate_task   →  station "desk" (Workbench)
+tool.completed tool=delegate_task
+done           "The Eiffel Tower is 330 metres tall."
+```
+Hermes **delegated** the actual work to a subagent, and the real `web_search` happened *inside*
+that subagent — whose events are intentionally not forwarded on this SSE stream. So:
+- The character walks/speaks correctly, **but** it goes to the generic Workbench, not the
+  Research Desk, because the only visible tool name is `delegate_task`. The per-tool → desk
+  mapping (`STATION_RULES` in `server.py`) does not fire on delegated work.
+- This means the **rich "walk to the right desk per tool" payoff depends on subagent events**,
+  which only the gateway event bus exposes — not this run-scoped SSE API.
+
+Other confirmed contract details from the live run:
+- The events SSE is **live & single-consumer**: you must subscribe right after `POST /v1/runs`
+  and hold the connection for the whole run. Reconnecting to an in-flight run returns
+  `{"error": {"code": "run_not_found"}}` even while the status endpoint still reads `running`.
+  `server.py` already does the right thing (subscribe-and-hold); no change needed.
+- A failed model call surfaces as `run.failed` only after Hermes exhausts its retries
+  (~118s for a 3× provider timeout), with an often-empty `error` string. The real cause shows
+  up in the **gateway terminal**, not the event payload.
+
+### Implication for next steps
+1. *Cosmetic, optional:* map `delegate`/`task` to a sensible station (e.g. a "Dispatch" desk) and
+   add a minimum dwell time per station so the cube doesn't teleport. Concept is already proven.
+2. *The real upgrade:* **subagents-as-characters via the gateway event bus** is no longer just a
+   "nice to have later" — it's what unlocks the per-tool desk mapping for typical Hermes runs,
+   which delegate. Promoted from the deferred list to the recommended next milestone.
 
 ## File layout
 
