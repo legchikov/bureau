@@ -194,3 +194,20 @@ All deferred until the concept is proven.
 
 Server-authoritative tick loop + multiple entities → multiplayer humans → possession →
 richer world (more stations, subagents via the gateway event bus) → persistence → k8s.
+
+## Feature #2 shipped (2026-06-04) — subagents-as-characters
+
+The validation finding (subagents hidden) is now addressed. Built:
+
+- **Hermes (opt-in patch):** `API_SERVER_SUBAGENT_EVENTS=true` forwards `subagent.start|tool|complete`
+  (with `subagent_id`/`parent_id`/`depth`/`goal`, and the real tool name) on the run SSE — events
+  that already reached the API callback but were dropped. Additive, off by default. Branch
+  `feat/api-server-subagent-events` on the `legchikov/hermes-agent` fork; PR proposed upstream.
+- **Bureau server:** relays the new events into `subagent.spawn|tool|done` WS messages (reusing the
+  tool→station map, which now fires on real tools). Demo mode scripts two concurrent subagents.
+- **Bureau scene:** an entity manager — the main agent is a "boss" at Dispatch; each subagent spawns
+  as its own cube, walks to the desk for its real tool, then fades out on completion. Graceful
+  single-cube fallback when subagent events are absent.
+
+See the implementation plan at
+`~/.claude/plans/lets-build-according-to-logical-turtle.md` for full detail.

@@ -29,9 +29,26 @@ Open http://127.0.0.1:8000 and type a task.
   Then in the browser, type e.g. `search the web for the Eiffel Tower height and tell me` and watch
   the cube walk to the Research Desk as the real `web_search` tool runs, then speak the live answer.
 
+### Multi-character mode (subagents)
+
+Real Hermes runs usually **delegate** work to subagents, where the actual tools run. To see each
+subagent appear as its own character — a "boss" that dispatches, and workers that walk to the right
+desk for the real tool they run — start Hermes with subagent events enabled:
+
+```bash
+API_SERVER_SUBAGENT_EVENTS=true API_SERVER_ENABLED=true hermes gateway run
+```
+
+This flag comes from a small, opt-in, backward-compatible patch to Hermes' API server
+(`gateway/platforms/api_server.py` — forward `subagent.*` events on the run SSE). It is proposed
+upstream as a pull request; without it (stock Hermes / flag off), Bureau still works in single-cube
+mode automatically — no errors, just one character. Demo mode also showcases the multi-character
+flow with no Hermes at all.
+
 ### Config
 
 - `HERMES_URL` — Hermes API base URL (default `http://127.0.0.1:8642`)
+- (Hermes side) `API_SERVER_SUBAGENT_EVENTS=true` — enable multi-character mode (see above)
 - `API_SERVER_KEY` — if Hermes requires a Bearer token, set the same value here
 - `PORT` — Bureau server port (default `8000`)
 

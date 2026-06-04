@@ -25,9 +25,17 @@ mode (Hermes unreachable) instead of relaying a real run.
 | `message` | `text` (str) | the reply **accumulated so far** (replace, don't append) → speech bubble |
 | `done` | `output` (str) | run finished → final reply; character returns home |
 | `error` | `error` (str) | run failed / relay error |
+| `subagent.spawn` | `id` (str), `goal` (str), `depth` (int?), `parent` (str?) | a subagent started → spawn a new character |
+| `subagent.tool` | `id` (str), `tool` (str), `station` (str) | that subagent began a tool → walk character `id` to `station` |
+| `subagent.done` | `id` (str), `status` (str?) | subagent finished → character leaves |
 
 `station` is one of: `research`, `code`, `art`, `comms`, `desk` (fallback). The browser keeps a
 fixed coordinate per station.
+
+The `subagent.*` messages drive **multi-character** mode: the main agent ("boss") dispatches via
+`delegate_task`, and each subagent appears as its own character that walks to the desk for the
+**real** tool it runs (e.g. `web_search` → Research). These only appear when the upstream Hermes
+forwards subagent events (see below); otherwise the boss alone runs in single-cube mode.
 
 ## Upstream Hermes contract (for maintainers)
 
@@ -46,4 +54,15 @@ The server is a thin relay over the Hermes API server (`127.0.0.1:8642`, enable 
 - `reasoning.available` → `text`
 - `run.completed` → `output`, `usage`; `run.failed` → `error` (str); `run.cancelled`; `run.stopping`
 
-Subagent / `_thinking` events are intentionally not forwarded by Hermes — out of scope here.
+**Subagent events (opt-in).** A stock Hermes does **not** forward subagent activity on this SSE.
+A Hermes started with `API_SERVER_SUBAGENT_EVENTS=true` additionally emits (each flat, keyed by
+`event`, with the same `run_id`/`timestamp`):
+
+- `subagent.start` → `subagent_id`, `parent_id`, `depth`, `goal`, `task_index`, `model`
+- `subagent.tool` → `subagent_id`, `tool` (the real tool, e.g. `web_search`), `preview`, `goal`
+- `subagent.complete` → `subagent_id`, `status`, `summary`
+
+The Bureau server maps these to the `subagent.spawn|tool|done` browser messages above (reusing the
+same tool→station rule). When they're absent (flag off / stock Hermes), Bureau runs in single-cube
+mode automatically — no configuration needed. This flag is added by an opt-in patch to Hermes
+(`gateway/platforms/api_server.py`); see the Bureau README.

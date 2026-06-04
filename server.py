@@ -98,6 +98,28 @@ async def relay_hermes(ws: WebSocket, prompt: str) -> None:
                     await ws.send_json({"type": "message", "text": reply})
                 elif kind == "reasoning.available":
                     await ws.send_json({"type": "reasoning", "text": ev.get("text", "")})
+                elif kind == "subagent.start":
+                    await ws.send_json({
+                        "type": "subagent.spawn",
+                        "id": ev.get("subagent_id"),
+                        "goal": ev.get("goal", ""),
+                        "depth": ev.get("depth"),
+                        "parent": ev.get("parent_id"),
+                    })
+                elif kind == "subagent.tool":
+                    tool = ev.get("tool", "")
+                    await ws.send_json({
+                        "type": "subagent.tool",
+                        "id": ev.get("subagent_id"),
+                        "tool": tool,
+                        "station": station_for(tool),
+                    })
+                elif kind == "subagent.complete":
+                    await ws.send_json({
+                        "type": "subagent.done",
+                        "id": ev.get("subagent_id"),
+                        "status": ev.get("status"),
+                    })
                 elif kind == "run.completed":
                     await ws.send_json({"type": "done", "output": ev.get("output", reply)})
                     return
@@ -111,26 +133,36 @@ async def relay_hermes(ws: WebSocket, prompt: str) -> None:
 
 
 async def relay_demo(ws: WebSocket, prompt: str) -> None:
-    """Scripted fake run so the scene works without Hermes. Tags every message with demo: true."""
+    """Scripted fake run so the scene works without Hermes. Mirrors how a real Hermes run delegates
+    to subagents: the boss dispatches, two subagents work concurrently at different desks, then the
+    boss speaks. Every message is tagged demo: true."""
     async def send(msg: dict, pause: float = 0.0):
         msg["demo"] = True
         await ws.send_json(msg)
         if pause:
             await asyncio.sleep(pause)
 
-    await send({"type": "reasoning", "text": "Let me look into that..."}, 0.8)
+    await send({"type": "reasoning", "text": "Let me delegate this..."}, 0.6)
+    # Boss delegates (the only top-level tool a real run shows).
+    await send({"type": "tool.started", "tool": "delegate_task", "station": "desk"}, 0.5)
 
-    await send({"type": "tool.started", "tool": "web_search", "station": "research"}, 1.4)
-    await send({"type": "tool.completed", "tool": "web_search", "error": False}, 0.6)
+    # Two subagents spawn and work partly in parallel.
+    await send({"type": "subagent.spawn", "id": "sa-0-demo0001", "goal": "research the question"}, 0.4)
+    await send({"type": "subagent.spawn", "id": "sa-1-demo0002", "goal": "draft a small script"}, 0.6)
 
-    await send({"type": "tool.started", "tool": "python", "station": "code"}, 1.4)
-    await send({"type": "tool.completed", "tool": "python", "error": False}, 0.6)
+    await send({"type": "subagent.tool", "id": "sa-0-demo0001", "tool": "web_search", "station": "research"}, 0.9)
+    await send({"type": "subagent.tool", "id": "sa-1-demo0002", "tool": "python", "station": "code"}, 1.2)
+    await send({"type": "subagent.tool", "id": "sa-0-demo0001", "tool": "web_extract", "station": "research"}, 1.0)
 
-    answer = f'(demo) Here\'s what I found about "{prompt.strip()}".'
+    await send({"type": "subagent.done", "id": "sa-1-demo0002", "status": "completed"}, 0.5)
+    await send({"type": "subagent.done", "id": "sa-0-demo0001", "status": "completed"}, 0.6)
+    await send({"type": "tool.completed", "tool": "delegate_task", "error": False}, 0.5)
+
+    answer = f'(demo) Here\'s what the team found about "{prompt.strip()}".'
     acc = ""
     for word in answer.split(" "):
         acc = (acc + " " + word).strip()
-        await send({"type": "message", "text": acc}, 0.12)
+        await send({"type": "message", "text": acc}, 0.1)
 
     await send({"type": "done", "output": answer})
 

@@ -18,13 +18,19 @@
       font-size: 12px; font-weight: 600; letter-spacing: .02em;
       color: #aeb6c2; text-shadow: 0 1px 3px #000; white-space: nowrap;
     }
+    .label.name {
+      font-size: 11px; font-weight: 600; color: #e7ebf1;
+      background: rgba(20,23,30,.72); padding: 2px 7px; border-radius: 7px;
+      text-shadow: none; transition: opacity .2s;
+    }
     .bubble {
       position: absolute; transform: translate(-50%, -100%);
-      max-width: 320px; padding: 8px 12px; border-radius: 12px;
+      max-width: 280px; padding: 7px 11px; border-radius: 12px;
       background: #f6f7f9; color: #15171c; font-size: 13px; line-height: 1.35;
       box-shadow: 0 6px 24px rgba(0,0,0,.45); opacity: 0; transition: opacity .15s;
-      pointer-events: none;
+      pointer-events: none; white-space: nowrap;
     }
+    .bubble.wrap { white-space: normal; }
     .bubble.show { opacity: 1; }
     .bubble.think { background: #2a2f3a; color: #cdd4df; font-style: italic; }
     .bubble::after {
@@ -79,27 +85,27 @@
   <script type="module">
     import * as THREE from "three";
 
-    // ---- Station layout (server uses these same names) -------------------------------------
-    const HOME = new THREE.Vector3(0, 0, 0);
+    // ---- Layout: a central Dispatch spot + labeled desks ------------------------------------
+    const DISPATCH = new THREE.Vector3(0, 0, 0);
     const STATIONS = {
-      research: { pos: new THREE.Vector3(-6, 0, -3), label: "Research Desk",   color: 0x4f8cff },
+      research: { pos: new THREE.Vector3(-6, 0, -3), label: "Research Desk",    color: 0x4f8cff },
       code:     { pos: new THREE.Vector3( 6, 0, -3), label: "Code Workstation", color: 0x47c97e },
-      art:      { pos: new THREE.Vector3(-6, 0,  4), label: "Art Easel",       color: 0xd96fd9 },
-      comms:    { pos: new THREE.Vector3( 6, 0,  4), label: "Comms Desk",      color: 0xe0a800 },
-      desk:     { pos: new THREE.Vector3( 0, 0,  6), label: "Workbench",       color: 0x9aa4b2 },
+      art:      { pos: new THREE.Vector3(-6, 0,  4), label: "Art Easel",        color: 0xd96fd9 },
+      comms:    { pos: new THREE.Vector3( 6, 0,  4), label: "Comms Desk",       color: 0xe0a800 },
+      desk:     { pos: new THREE.Vector3( 0, 0,  6), label: "Workbench",        color: 0x9aa4b2 },
     };
 
-    // ---- Three.js setup --------------------------------------------------------------------
+    // ---- Three.js setup ---------------------------------------------------------------------
     const canvas = document.getElementById("scene");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0e1014);
-    scene.fog = new THREE.Fog(0x0e1014, 18, 40);
+    scene.fog = new THREE.Fog(0x0e1014, 18, 42);
 
     const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
-    camera.position.set(0, 11, 15);
+    camera.position.set(0, 12, 16);
     camera.lookAt(0, 0, 0);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.55));
@@ -107,20 +113,20 @@
     key.position.set(6, 12, 8);
     scene.add(key);
 
-    // Floor
     const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(40, 40),
+      new THREE.PlaneGeometry(44, 44),
       new THREE.MeshStandardMaterial({ color: 0x171b22, roughness: 1 })
     );
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
-    const grid = new THREE.GridHelper(40, 40, 0x2a3340, 0x1d232c);
+    const grid = new THREE.GridHelper(44, 44, 0x2a3340, 0x1d232c);
     grid.position.y = 0.01;
     scene.add(grid);
 
-    // Desks (a small box per station)
     const overlay = document.getElementById("overlay");
-    const labelEls = {};
+
+    // Desks + their static labels
+    const deskLabels = {};
     for (const [name, s] of Object.entries(STATIONS)) {
       const desk = new THREE.Mesh(
         new THREE.BoxGeometry(2, 0.7, 1.2),
@@ -128,41 +134,98 @@
       );
       desk.position.copy(s.pos).setY(0.35);
       scene.add(desk);
-
       const el = document.createElement("div");
       el.className = "label";
       el.textContent = s.label;
       overlay.appendChild(el);
-      labelEls[name] = { el, world: s.pos.clone().setY(1.4) };
+      deskLabels[name] = { el, world: s.pos.clone().setY(1.5) };
+    }
+    // Dispatch marker label
+    {
+      const el = document.createElement("div");
+      el.className = "label";
+      el.style.color = "#6b7280";
+      el.textContent = "Dispatch";
+      overlay.appendChild(el);
+      deskLabels.__dispatch = { el, world: DISPATCH.clone().setY(0.05) };
     }
 
-    // Agent cube
-    const agent = new THREE.Mesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ color: 0xf6f7f9, roughness: 0.4, metalness: 0.1 })
-    );
-    agent.position.copy(HOME).setY(0.5);
-    scene.add(agent);
+    // ---- Entity manager: boss + per-subagent cubes ------------------------------------------
+    const entities = new Map();           // id -> entity
+    const SUB_COLORS = [0x4f8cff, 0x47c97e, 0xd96fd9, 0xe0a800, 0xff7b54, 0x33c4d8];
+    let spawnCount = 0;
 
-    // Speech / thinking bubble (single element, follows the agent)
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    overlay.appendChild(bubble);
-    let bubbleTimer = null;
-    function showBubble(text, think = false, sticky = false) {
-      bubble.textContent = text;
-      bubble.classList.toggle("think", think);
-      bubble.classList.add("show");
-      clearTimeout(bubbleTimer);
-      if (!sticky) bubbleTimer = setTimeout(() => bubble.classList.remove("show"), 6000);
+    function makeEntity(id, { boss = false, goal = "" } = {}) {
+      const color = boss ? 0xf6f7f9 : SUB_COLORS[spawnCount % SUB_COLORS.length];
+      const size = boss ? 1.0 : 0.78;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(size, size, size),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1, transparent: true, opacity: 1 })
+      );
+      mesh.position.copy(DISPATCH).setY(size / 2);
+      scene.add(mesh);
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      overlay.appendChild(bubble);
+
+      let nameEl = null;
+      if (!boss) {
+        nameEl = document.createElement("div");
+        nameEl.className = "label name";
+        nameEl.textContent = goal ? goal.slice(0, 24) : "subagent";
+        overlay.appendChild(nameEl);
+      }
+
+      const slot = boss ? 0 : ++spawnCount;
+      const e = {
+        id, boss, mesh, bubble, nameEl, size, slot,
+        target: DISPATCH.clone().setY(size / 2),
+        bubbleTimer: null, fading: false, dead: false,
+      };
+      entities.set(id, e);
+      return e;
     }
-    function hideBubble() { clearTimeout(bubbleTimer); bubble.classList.remove("show"); }
 
-    // ---- Movement: tween the agent toward a target on the floor ----------------------------
-    let target = HOME.clone();
-    function walkTo(vec3) { target = vec3.clone().setY(0.5); }
+    function ensureBoss() {
+      return entities.get("main") || makeEntity("main", { boss: true });
+    }
 
-    // Project a world coord to screen pixels for the CSS overlays
+    // Stand in front of a desk (offset by slot so multiple cubes don't overlap)
+    function stationTarget(station, e) {
+      const s = STATIONS[station] || STATIONS.desk;
+      const lateral = ((e.slot % 3) - 1) * 1.15;
+      return s.pos.clone().add(new THREE.Vector3(lateral, 0, 1.5)).setY(e.size / 2);
+    }
+
+    function walkTo(e, vec) { e.target = vec.clone().setY(e.size / 2); }
+
+    function showBubble(e, text, think = false, sticky = false) {
+      e.bubble.textContent = text;
+      e.bubble.classList.toggle("think", think);
+      e.bubble.classList.toggle("wrap", text.length > 30);
+      e.bubble.classList.add("show");
+      clearTimeout(e.bubbleTimer);
+      if (!sticky) e.bubbleTimer = setTimeout(() => e.bubble.classList.remove("show"), 6000);
+    }
+
+    function removeEntity(e) {
+      scene.remove(e.mesh);
+      e.mesh.geometry.dispose();
+      e.mesh.material.dispose();
+      e.bubble.remove();
+      if (e.nameEl) e.nameEl.remove();
+      entities.delete(e.id);
+    }
+
+    function clearSubagents() {
+      for (const e of [...entities.values()]) {
+        if (!e.boss) removeEntity(e);
+      }
+      spawnCount = 0;
+    }
+
+    // ---- Screen projection for overlays -----------------------------------------------------
     const proj = new THREE.Vector3();
     function toScreen(world) {
       proj.copy(world).project(camera);
@@ -184,29 +247,46 @@
     function animate() {
       requestAnimationFrame(animate);
 
-      // ease the agent toward target; gentle bob while moving
-      agent.position.lerp(target, 0.06);
-      const moving = agent.position.distanceTo(target) > 0.05;
-      agent.position.y = 0.5 + (moving ? Math.abs(Math.sin(performance.now() / 120)) * 0.12 : 0);
-      agent.rotation.y += moving ? 0.04 : 0.005;
+      for (const e of [...entities.values()]) {
+        e.mesh.position.lerp(e.target, 0.06);
+        const moving = e.mesh.position.distanceTo(e.target) > 0.05;
+        e.mesh.position.y = e.size / 2 + (moving ? Math.abs(Math.sin(performance.now() / 120)) * 0.12 : 0);
+        e.mesh.rotation.y += moving ? 0.045 : 0.005;
 
-      // position desk labels
-      for (const { el, world } of Object.values(labelEls)) {
+        // Fade-out lifecycle: when done, drift home then dissolve
+        if (e.fading) {
+          e.mesh.material.opacity = Math.max(0, e.mesh.material.opacity - 0.02);
+          if (e.nameEl) e.nameEl.style.opacity = e.mesh.material.opacity;
+          if (e.mesh.material.opacity <= 0 && !moving) { removeEntity(e); continue; }
+        }
+
+        // overlays
+        const head = e.mesh.position.clone(); head.y += e.size + 0.6;
+        const bp = toScreen(head);
+        e.bubble.style.left = bp.x + "px";
+        e.bubble.style.top = bp.y + "px";
+        if (e.nameEl) {
+          const np = toScreen(e.mesh.position.clone().setY(e.size + 0.05));
+          e.nameEl.style.left = np.x + "px";
+          e.nameEl.style.top = np.y + "px";
+          e.nameEl.style.display = np.visible ? "block" : "none";
+        }
+      }
+
+      for (const k in deskLabels) {
+        const { el, world } = deskLabels[k];
         const p = toScreen(world);
         el.style.display = p.visible ? "block" : "none";
         el.style.left = p.x + "px";
         el.style.top = p.y + "px";
       }
-      // position bubble above the agent's head
-      const bp = toScreen(agent.position.clone().setY(1.6));
-      bubble.style.left = bp.x + "px";
-      bubble.style.top = bp.y + "px";
 
       renderer.render(scene, camera);
     }
+    ensureBoss();
     animate();
 
-    // ---- WebSocket: drive the scene from server events -------------------------------------
+    // ---- WebSocket: drive the scene ---------------------------------------------------------
     const statusEl = document.getElementById("status");
     const statusTxt = statusEl.querySelector(".txt");
     const sendBtn = document.getElementById("send");
@@ -225,8 +305,8 @@
         statusTxt.textContent = "disconnected — retrying…";
         setTimeout(connect, 1500);
       };
-      ws.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
         console.log("event", msg);
         handle(msg);
       };
@@ -239,40 +319,72 @@
         runningDemo = true;
         statusTxt.innerHTML = 'connected <span class="demo-tag">· demo mode (Hermes offline)</span>';
       }
+      const boss = ensureBoss();
+
       switch (msg.type) {
-        case "tool.started": {
-          const s = STATIONS[msg.station] || STATIONS.desk;
-          walkTo(s.pos);
-          showBubble(`using ${msg.tool}…`, true);
+        // ----- top-level (boss) -----
+        case "tool.started":
+          if (msg.tool === "delegate_task") {
+            showBubble(boss, "delegating to the team…", true);   // boss stays at Dispatch
+          } else {
+            // single-cube fallback (stock Hermes, no subagent events)
+            walkTo(boss, stationTarget(msg.station, boss));
+            showBubble(boss, `using ${msg.tool}…`, true);
+          }
           break;
-        }
         case "tool.completed":
           break;
         case "reasoning":
-          showBubble(msg.text || "…", true);
+          showBubble(boss, msg.text || "…", true);
           break;
         case "message":
-          showBubble(msg.text, false, true);
+          showBubble(boss, msg.text, false, true);
           break;
         case "done":
-          showBubble(msg.output, false);
-          walkTo(HOME);
+          showBubble(boss, msg.output, false, false);
+          walkTo(boss, DISPATCH);
           sendBtn.disabled = false;
           break;
         case "error":
-          showBubble("⚠ " + msg.error, false);
-          walkTo(HOME);
+          showBubble(boss, "⚠ " + msg.error, false);
+          walkTo(boss, DISPATCH);
           sendBtn.disabled = false;
           break;
+
+        // ----- subagents -----
+        case "subagent.spawn": {
+          if (!msg.id || entities.has(msg.id)) break;
+          const e = makeEntity(msg.id, { goal: msg.goal || "" });
+          showBubble(e, msg.goal ? msg.goal.slice(0, 40) : "on it…", true);
+          break;
+        }
+        case "subagent.tool": {
+          const e = entities.get(msg.id);
+          if (!e) break;
+          walkTo(e, stationTarget(msg.station, e));
+          showBubble(e, `using ${msg.tool}…`, true);
+          break;
+        }
+        case "subagent.done": {
+          const e = entities.get(msg.id);
+          if (!e) break;
+          e.fading = true;
+          walkTo(e, DISPATCH);
+          e.bubble.classList.remove("show");
+          break;
+        }
       }
     }
 
-    document.getElementById("bar").addEventListener("submit", (e) => {
-      e.preventDefault();
+    document.getElementById("bar").addEventListener("submit", (ev) => {
+      ev.preventDefault();
       const prompt = promptEl.value.trim();
       if (!prompt || !ws || ws.readyState !== WebSocket.OPEN) return;
       runningDemo = false;
-      hideBubble();
+      clearSubagents();
+      const boss = ensureBoss();
+      boss.bubble.classList.remove("show");
+      walkTo(boss, DISPATCH);
       sendBtn.disabled = true;
       ws.send(JSON.stringify({ type: "task", prompt }));
       promptEl.value = "";
